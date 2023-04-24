@@ -1,0 +1,158 @@
+
+// Project:		EMMA1 Microcode Processor
+// Entity		Multiplexor/adder/register unit
+// File		mpx_add_reg.hase
+// Date:		28 May 2003, revised Mar 2020
+
+// This entity is used as the Program Counter and the Microprogram
+// Counter. It is required to execute two instructions:
+// 	(a) to  load its register from an external source 
+// 	(b) to increment its register
+//	(c) to add the value from an external source to its register.
+// It has three data inputs, two data outputs and a control input.
+// The control input receives its input from the Microcode Unit as a
+// single hex character which is converted to an integer control word.
+// The adder has two inputs, one from Input 1 (externally connected
+// to its own Output and controlled by bit 28 of the control word) and
+// one from multiplexor logic whose inputs are the value 0 or 1
+// according to the value of bit 29 of the control word (the +1entities are
+// just for show!), and Input3 controlled by bit 30 of the control word. if bit
+// 28 or 30 is a 1, the corresponding control input is set to -1 (i.e. all 1s)
+// If bits 29 and 30 both are 1, the simulation is stopped and an error is reported.
+// Output1 sends a result packet whenever the entity is activated.
+// Output 2 can be connected to a separate entity; it is controlled
+// by bit 31 of the control word.
+
+// Control word:
+// Bit 28 controls input1 (from own register)					value = 8
+// Bit 29 sets input2 to  to 0 or 1 		 					value = 4
+// Bit 30 controls input3 (from Bus or Microcode Unit)			value = 2
+// Bit 31 controls output2 (to Memory or Microcode Unit)		value = 1
+
+$class_decls
+
+//structures and variables
+
+  char myname[4];
+
+  bool reg_value_updated, control_error;
+  char c_input;
+  int  control;
+  int reg_value, reg_control,  pl1, ext_value, ext_control, adder_output;
+  int result;
+  int old_state;
+
+//classes
+
+$class_defs
+
+$pre
+
+  reg_value_updated = false;
+  control_error = false;
+  Reg_value = 0;
+  my_state = R_IDLE;
+  old_state = R_IDLE;
+  dump_state();
+  c_input = 0;
+  control = 0;
+  reg_value = 0;
+  reg_control = 0;
+  pl1 = 0;
+  ext_value = 0;
+  ext_control = 0;
+  adder_output = 0;
+
+  if (strcmp(get_name(), "MPC") == 0)
+	{strcpy(myname, "MPC");}
+	 
+  if (strcmp(get_name(), "PC") == 0)
+	{strcpy(myname, "PC");}
+
+$phase0
+
+// predicates for use in sim_waiting test
+
+  sim_from_port A_Input (input1);	    	// from own register	selected by control bit 28 (= 8)
+  sim_from_port B_Input (input3);	  	// external input	selected by  control bit 30 (=2)
+  sim_from_port C_Input (control_input);	    
+
+    // DEAL WITH INPUTS
+
+  if  (sim_waiting(ev, C_Input) > 0)
+     {
+	SIM_CAST_DEL(char, c_input, ev);
+	control = char_to_hex(c_input);
+     }
+
+//  if (control >= 1) 						// one of the inputs is active
+  if (control > 1) 						// one of the inputs is active
+	  {my_state = R_BUSY;}
+	else
+	  {my_state = R_IDLE;}
+
+  if  (sim_waiting(ev, A_Input) > 0)
+     {SIM_CAST_DEL( int, reg_value, ev); }
+
+  if  (sim_waiting(ev, B_Input) > 0)
+     {	SIM_CAST_DEL( int, ext_value, ev); }
+
+  if (my_state == R_BUSY)
+   {
+	// form mpx and adder input control bits
+    reg_control = 0 - ((control & 8) >> 3);		// select own register value (A_Input)
+    pl1 = (control & 4) >> 2;				// create +1
+    ext_control = 0 - ((control & 2) >> 1);		// select external input value B_Input
+    
+  if ( ((control & 4) == 4) && ((control & 2) == 2) )
+   {
+	control_error = true;
+	stopSimulation();
+    }
+
+// perform add
+
+  adder_output = (reg_value & reg_control) + (pl1 | (ext_control & ext_value));
+
+// load Register
+
+	  Reg_value = adder_output;
+	  reg_value_updated = true;
+	  result = Reg_value;
+	}
+  if ((my_state != old_state) || reg_value_updated)
+	  {dump_state();
+	   old_state = my_state;
+	   reg_value_updated = false;
+	  }
+
+	// end of ClockPhase = 0
+
+$phase1
+
+// If busy, send result to output 1
+
+ if (my_state == R_BUSY)
+	  {send_RESULT(output1, result);}
+
+// If output2 control bit = 1, send result to output 2
+
+ if ((control & 1) == 1)
+	  {send_RESULT(output2, result);}
+
+  c_input = 0;
+  control = 0;
+
+	// end of  ClockPhase 1
+
+$report
+
+  if (control_error)
+   {printf("%s: Both multiplexer control signals set to 1 \n", myname);}
+
+
+
+
+
+
+

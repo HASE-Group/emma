@@ -1,0 +1,349 @@
+// Project:		EMMA V2
+// Entity		ALU
+// File		alu.hase
+// Date:		Feb 2006, revised Mar 2020
+
+// This unit has a control input, two data inputs and one data output.
+// Input values are copied into registers A and B and the result of
+// an alu function is stored in an Accumulator ACC
+// It combines the inputs together according to the function sent from
+// the Microcode unit as part of the control word and sends the result
+// to its output. If the function is one of:
+// 0: ADD, 1: SUB, 2: AND, 3: OR, 4: XOR, 5: SLL, 6: SRA, 7: SRL
+// i.e. the m.s. function bit = 0, it is executed directly.
+// The remaining functions are described below.
+
+// C_CODE.s2[0] = 0 if result = 0;
+// C_CODE.s2[1] = 1 if result < 0;
+
+// Control word:
+// The control input word (c_input) contains three characters:
+//
+//	character 0 - alt_ucode
+//		bits 20, 21, 22, 23 of the microcode alternative format word:
+// 		bit 0 - (value 8) Inhibit A to alu
+//		bit 1 - (value 4) Inhibit B to alu
+//		bit 2 - (value 2) Enable ACC to alu
+//		bit 3 - (value 1) Inhibit B to alu if A<31> = 0
+//
+//	character 1 - std_ucode
+//		bits 24, 25, 26, 27 of the microcode word
+//		bit 0 - (value 8) - controls input1 (copied into A)
+//		bit 1 - (value 4) - controls input2 (copied into B)
+//		bit 2 - (value 2) - controls output1 (to Registers)
+//		bit 3 - (value 1) - controls output2 (to Bus2)
+//
+//	character 2 - function
+//		bits 28, 29, 30, 31 of the microcode word determine the function:
+//
+//		0: ADD, 1: SUB, 2: AND, 3: OR, 4: XOR, 5: SLL, 6: SRA, 7: SRL
+//		8: NOP, 9: reverse SUB, 	0xA: Negate A, 0xB: Negate B, 0xC: Shift A -> by 1 & set CC,
+//		0xD: Shift B <- by 1, 0xE: Set Counter, 0xF: Decrement Counter & set CC
+
+
+$class_decls
+
+  microcode * myMU;
+
+//structures and variables
+
+  bool active, execute_alu_fn, non_alu_fn;
+  bool A_input_error, B_input_error;
+  int A_input, B_input;
+  int alu_A_input, alu_B_input;
+  int function, mask, shift, sign_ext;
+  int old_state;
+
+  int result, cond_code;
+  int alt_ucode, std_ucode, literal;
+
+  t_two_ch cc_input, cc_output;
+  t_alu_mcode c_input;
+
+//classes
+
+  int Compute();
+
+$class_defs
+
+  int alu::Compute()
+
+// computes result of an instruction
+{
+	  if      (function == 0)	// ADD
+		{result = alu_A_input + alu_B_input;}
+
+	  else if (function == 1)	// SUB
+		{result = alu_A_input - alu_B_input;}
+
+	  else if (function == 2)	// AND
+		{result = alu_A_input & alu_B_input;}
+
+	  else if (function == 3)	// OR
+		{result = alu_A_input | alu_B_input;}
+
+	  else if (function == 4)	// XOR
+		{result = alu_A_input ^ alu_B_input;}
+
+	  else if (function == 5)	// SLL
+		{
+		shift = alu_B_input;
+		result = alu_A_input << shift;
+		}
+
+	  else if (function == 6)	// SRL
+		{
+		shift = alu_B_input;
+		mask = -1 ^ ( ( (pow (2, shift)) - 1) << (32 - shift) );
+		result = alu_A_input >> shift;
+		result &= mask;
+		}
+
+	  else if (function == 7)	// SRA
+		{
+		shift = alu_B_input;
+		sign_ext = alu_A_input & (1 << 31);
+		mask = ( (pow (2, shift)) - 1) << (32 - shift);
+		result = alu_A_input >> shift;
+			if (sign_ext != 0)
+			{result |= mask;}
+		}
+
+	  else if      (function == 9)	// REVERSE SUB
+		{result = alu_B_input - alu_A_input;}
+
+   	return result;
+}
+
+$pre
+
+  myMU = (microcode*) sim.get_entity( sim.get_entity_id( "MICROCODE" ) );
+
+  active = false;
+  execute_alu_fn = false;
+  non_alu_fn = false;
+  A = 0;
+  A_input = 0;
+  A_input_error = false;
+  alu_A_input = 0;
+  B = 0;
+  B_input = 0;
+  B_input_error = false;
+  alu_B_input = 0;
+  D = 0;
+  std_ucode = 0;
+  alt_ucode = 0;
+  function = 0;
+  strcpy(C_CODE.s2, "00");
+  result = 0;
+  ACC = 0;
+
+  my_state = ALU_IDLE;
+  old_state = ALU_IDLE;
+  dump_state();
+
+$phase0
+
+// predicates for use in sim_waiting test
+
+  sim_from_port C_Input(control_input);	    
+  sim_from_port Input_1(input1);	    
+  sim_from_port Input_2(input2);	    
+
+// RESET state to IDLE
+  active = false;
+  my_state = ALU_IDLE;
+
+
+// DEAL WITH INPUT
+
+  if  (sim_waiting(ev, C_Input) > 0)
+     {
+	SIM_CAST_DEL(t_alu_mcode, c_input, ev);
+	strcpy (ACODE.s3, c_input.s3);
+	ACODE.literal = c_input.literal;
+	alt_ucode =  char_to_hex(c_input.s3[0]);
+	std_ucode =  char_to_hex(c_input.s3[1]);
+	function  =  char_to_hex(c_input.s3[2]);
+	literal   =  c_input.literal;
+	if ((literal & 128) == 128)
+	 {sign_ext = (-1 ^ 255);}
+	else
+	 {sign_ext = 0;}
+	literal = literal | sign_ext;
+	active = true;
+
+// set execute_alu_fn true or false
+
+	if (function < 10)
+	 {
+	  execute_alu_fn = true;
+	  non_alu_fn = false;
+	 }
+	else
+	 {
+	  execute_alu_fn = false;
+	  non_alu_fn = true;
+     	 }
+      }
+
+  A_input = 0;
+  if  (sim_waiting(ev, Input_1) > 0)
+     {SIM_CAST_DEL( int, A_input, ev);
+printf("ALU: muldiv = %d, A_input = %d \n",  myMU->muldiv, A_input );
+	if ( myMU->muldiv && ( (A_input > 65535) || (A_input < -65536)) )
+	 {
+	  A_input_error = true;
+	  stopSimulation(0);
+	 }
+     }
+
+  B_input = 0;
+  if  (sim_waiting(ev, Input_2) > 0)
+     {SIM_CAST_DEL( int, B_input, ev); 
+	if ( myMU->muldiv && ( (B_input > 65535) || (B_input < -65536)) )
+	 {
+	  B_input_error = true;
+	  stopSimulation(0);
+	 }
+     }
+
+        if ((std_ucode & 8) == 8)
+	 {A = A_input;}
+
+        if ((std_ucode & 4) == 4)
+	 {B = B_input;}
+
+// if execute_alu_fn is set, copy A and INPUTB to alu, unless
+// alt_ucode bits are set, and compute result 
+
+  if (execute_alu_fn)
+   {
+    my_state  = ALU_BUSY;
+    alu_A_input = A;
+    alu_B_input = B;
+    if ((alt_ucode & 8) == 8)
+     {alu_A_input = 0;}
+    if ((alt_ucode & 4) == 4)
+     {alu_B_input = 0;}
+    if ((alt_ucode & 2) == 2)
+	{alu_A_input = ACC;}	// use ACC as ALU input
+
+    if ( ((alt_ucode & 1) == 1) && ((A & 1) == 0) )	
+	{alu_B_input = 0;}		// set alu_B_input = 0 if ext_code & l.s. bit of A = 0
+						// use INPUTB as input if not ext_code or if l.s. bit of A = 1
+    result = Compute();
+    ACC = result;
+
+   strcpy(C_CODE.s2, "00");
+    if (result != 0)
+	{C_CODE.s2[0] = '1';}
+    if (result < 0)
+	{C_CODE.s2[1] = '1';}
+   }
+
+  if (non_alu_fn)
+   {
+
+    if (function == 10)
+	  {
+	   my_state = ALU_A;
+	   A = 0 - A;
+	   }
+
+    else if (function == 11)
+	  {
+	   my_state = ALU_B;
+	   B = 0 - B;
+	  }
+
+    else if (function == 12)
+	{
+	 my_state = ALU_A;
+	 if (literal < 0)	// shift A <<
+	  {
+	   literal = 0 - literal;
+	   A = A << literal;
+	   A = A | (1 ^ hex_to_int (C_CODE.s2[1]));
+	  }
+	  
+         else						// shift A >> and set condition code
+	  {
+	   A = A >> literal;
+	    if (A == 0)
+	     {C_CODE.s2[0] = '0';}
+	    else
+	     {C_CODE.s2[0] = '1';}
+	    if (A < 0)
+	     {C_CODE.s2[1] = '1';}
+	    else
+	     {C_CODE.s2[1] = '0';}
+           }
+	}
+
+    else if (function == 13)
+	{
+	 my_state = ALU_B;
+	 if (literal < 0)				// shift INPUTB >>
+	  {
+	   literal = 0 - literal;
+	   B = B >> literal;
+	  }
+	 else						// shift INPUTB <<
+	  {B = B << literal;}
+	 }
+    else if (function == 14)			// Set Dcount to literal
+	{
+	 my_state = ALU_D;
+	 D= literal;
+	}
+
+    else if (function == 15)			// Decrement D & set CC
+	{
+	 my_state = ALU_D;
+	 D -= 1;
+	 if (D  == 0)
+	  {C_CODE.s2[0] = '0';}
+	 else
+	  {C_CODE.s2[0] = '1';}
+
+	 if (D < 0)
+	  {C_CODE.s2[1] = '1';}
+	 else
+	  {C_CODE.s2[1] = '0';}
+	}
+
+    non_alu_fn = false;
+   }
+	dump_state();
+
+	// end of ClockPhase = 0
+
+$phase1
+
+// If std_ucode output1 bit = 1, send result to output1 
+// If std_ucode bit output2 = 1, send result to output2 
+
+  if (active)
+  {
+   if ((std_ucode & 1) == 1)
+	{send_RESULT(output2, ACC);}
+
+   if ((std_ucode & 2) == 2)
+	{send_RESULT(output1, ACC);}
+
+    execute_alu_fn = false;
+  }
+  std_ucode = 0;
+  alt_ucode = 0;
+
+	// end of  ClockPhase 1
+
+$report
+
+  if (A_input_error)
+   {printf("Simulation aborted: ALU A input operand (%d) out of range\n", A_input);}
+
+  if (B_input_error)
+   {printf("Simulation aborted: ALU B input operand (%d) out of range\n", B_input);}
+
